@@ -52,6 +52,10 @@ const notaFiscalSchema = {
           valor_total: { type: 'string' },
           ncm: { type: 'string' },
           cfop: { type: 'string' },
+          categoria: {
+            type: 'string',
+            enum: ['Defensivos', 'Fertilizantes', 'Lenha', 'Outros'],
+          },
         },
         required: [
           'produto',
@@ -61,6 +65,7 @@ const notaFiscalSchema = {
           'valor_total',
           'ncm',
           'cfop',
+          'categoria',
         ],
       },
     },
@@ -80,10 +85,39 @@ const notaFiscalSchema = {
 };
 
 const instrucaoNotaFiscal = `
-Você é o módulo de leitura documental do aplicativo Gestão Tabaco.
+Você é o módulo de leitura documental e classificação de produtos agrícolas do aplicativo Gestão Tabaco.
 Sua tarefa é ler uma NF-e/DANFE e transformar o conteúdo em dados estruturados.
 
-REGRAS OBRIGATÓRIAS:
+Além de extrair os dados fiscais, você DEVE classificar cada produto individualmente em uma das quatro categorias permitidas:
+- Defensivos
+- Fertilizantes
+- Lenha
+- Outros
+
+REGRAS DE CLASSIFICAÇÃO:
+1. DEFENSIVOS:
+   Classifique como "Defensivos" produtos destinados ao controle de pragas, doenças, plantas daninhas ou outros agentes prejudiciais às culturas.
+   Inclua fungicidas, inseticidas, herbicidas, acaricidas, bactericidas, nematicidas, reguladores/antibrotantes quando claramente comercializados como defensivos agrícolas e produtos fitossanitários.
+   Inclua também produtos biológicos destinados ao controle fitossanitário, como produtos à base de Bacillus, Trichoderma, Beauveria e outros agentes de controle biológico.
+   Não classifique um produto como fertilizante apenas porque possui micronutrientes se a finalidade principal indicada pelo produto for controle fitossanitário.
+
+2. FERTILIZANTES:
+   Classifique como "Fertilizantes" adubos e produtos cuja finalidade principal seja fornecer nutrientes às plantas.
+   Inclua adubos de base, adubos de cobertura, NPK, MAP, MKP, ureia, nitrato, sulfato, fosfato, cloreto de potássio, sulfato de potássio, sulfato de magnésio, nitrato de cálcio, micronutrientes e fertilizantes foliares.
+   Se a descrição indicar claramente "adubo foliar", "fertilizante foliar", "fertilizante", "adubo" ou finalidade de nutrição vegetal, use "Fertilizantes".
+
+3. LENHA:
+   Classifique como "Lenha" madeira ou combustível lenhoso destinado à queima, secagem ou cura, como lenha de eucalipto.
+
+4. OUTROS:
+   Use "Outros" quando o produto não se enquadrar nas três categorias acima, como sementes, mudas, substratos, EPIs, ferramentas, materiais de embalagem, peças, equipamentos, serviços ou outros materiais.
+
+5. A classificação deve considerar a finalidade principal do produto e, quando disponível, o nome comercial, princípio ativo, composição, descrição e contexto da NF-e.
+6. Não classifique apenas pela palavra isolada do nome quando houver informação suficiente para identificar a finalidade do produto.
+7. Em caso de dúvida real entre categorias, use "Outros" em vez de inventar uma finalidade.
+8. Retorne exatamente uma categoria para cada item da NF.
+
+REGRAS DE EXTRAÇÃO:
 1. Leia o documento visualmente e também considere o texto extraído do PDF.
 2. Extraia TODOS os produtos/serviços da tabela de itens, não apenas o primeiro.
 3. Em DANFEs, a descrição do produto pode estar em uma ou mais linhas e a linha fiscal seguinte pode conter NCM, CST, CFOP, unidade, quantidade, valor unitário e valor total. Relacione corretamente essas linhas.
@@ -150,7 +184,14 @@ app.post('/api/ler-nota-fiscal', nfLimiter, upload.single('file'), async (req, r
     }
 
     const mime = mimeFromName(req.file.originalname);
-    if (!['application/pdf', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/jpeg'].includes(mime)) {
+    if (![
+      'application/pdf',
+      'image/png',
+      'image/webp',
+      'image/heic',
+      'image/heif',
+      'image/jpeg'
+    ].includes(mime)) {
       return res.status(400).json({
         error: 'Formato não suportado. Envie PDF, JPG, JPEG, PNG, WEBP, HEIC ou HEIF.',
       });
@@ -161,7 +202,13 @@ app.post('/api/ler-nota-fiscal', nfLimiter, upload.single('file'), async (req, r
     const content = [
       {
         type: 'input_text',
-        text: `${instrucaoNotaFiscal}\n\nO arquivo recebido é do tipo ${mime === 'application/pdf' ? 'pdf' : 'imagem'}.\nAnalise o documento inteiro e retorne os dados da nota fiscal.`,
+        text: `${instrucaoNotaFiscal}
+
+O arquivo recebido é do tipo ${
+          mime === 'application/pdf' ? 'pdf' : 'imagem'
+        }.
+
+Analise o documento inteiro e retorne os dados da nota fiscal, classificando cada item conforme as regras acima.`,
       },
     ];
 
@@ -211,16 +258,22 @@ app.post('/api/ler-nota-fiscal', nfLimiter, upload.single('file'), async (req, r
 
     if (!response.ok) {
       let message = `HTTP ${response.status}`;
+
       try {
         const errorBody = JSON.parse(raw);
-        if (errorBody?.error?.message) message = errorBody.error.message;
+
+        if (errorBody?.error?.message) {
+          message = errorBody.error.message;
+        }
       } catch (_) {}
+
       return res.status(502).json({
         error: `A OpenAI recusou a solicitação: ${message}`,
       });
     }
 
     let decoded;
+
     try {
       decoded = JSON.parse(raw);
     } catch (_) {
@@ -230,6 +283,7 @@ app.post('/api/ler-nota-fiscal', nfLimiter, upload.single('file'), async (req, r
     }
 
     const text = extractResponseText(decoded);
+
     if (!text.trim()) {
       return res.status(502).json({
         error: 'A OpenAI não retornou dados estruturados para a nota fiscal.',
@@ -237,6 +291,7 @@ app.post('/api/ler-nota-fiscal', nfLimiter, upload.single('file'), async (req, r
     }
 
     let result;
+
     try {
       result = JSON.parse(text);
     } catch (_) {
@@ -252,8 +307,10 @@ app.post('/api/ler-nota-fiscal', nfLimiter, upload.single('file'), async (req, r
     }
 
     return res.json(result);
+
   } catch (error) {
     console.error('Erro em /api/ler-nota-fiscal:', error);
+
     return res.status(500).json({
       error: 'Erro interno ao processar a nota fiscal.',
     });
@@ -268,6 +325,7 @@ app.use((error, req, res, next) => {
   }
 
   console.error('Erro não tratado:', error);
+
   return res.status(500).json({
     error: 'Erro interno do servidor.',
   });
